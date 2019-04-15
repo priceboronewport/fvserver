@@ -5,7 +5,6 @@ import (
 	"../cola/webapp"
 	"bytes"
 	"fmt"
-	"html/template"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -19,11 +18,6 @@ import (
 var fv *filevault.FileVault
 var root_path string
 var temp_path string
-
-type RenderParams struct {
-	Head template.HTML
-	Body template.HTML
-}
 
 func main() {
 	webapp.Register("", "/", Handler, false)
@@ -62,14 +56,13 @@ func Handler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams) {
 func CheckHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams) {
 	results, err := fv.Check()
 	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(w, " ** ERROR: check: %s\n", err.Error())
 	}
 	if len(results) > 0 {
 		for _, v := range results {
 			fmt.Fprintf(w, "%s\n", v)
 		}
-	} else {
-		fmt.Fprintf(w, "No errors.\n")
 	}
 }
 
@@ -139,11 +132,11 @@ func ExtractHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerPara
 }
 
 func ImportHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams) {
-
 	if r.Method == "POST" {
 		r.ParseMultipartForm(32 << 20)
 		file, _, err := r.FormFile("file")
 		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
 			fmt.Fprintf(w, " ** ERROR: %s\n", err.Error())
 			return
 		} else {
@@ -151,12 +144,14 @@ func ImportHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParam
 			temp_filename := temp_path + p.Session + "_import"
 			f, err := os.OpenFile(temp_filename, os.O_WRONLY|os.O_CREATE, 0666)
 			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
 				fmt.Fprintf(w, " ** ERROR: import: %s\n", err.Error())
 				return
 			}
 			io.Copy(f, file)
 			filename := r.Form.Get("fn")
 			if filename == "" {
+				w.WriteHeader(http.StatusBadRequest)
 				fmt.Fprintf(w, " ** ERROR: import: No filename specified.\n")
 				return
 			}
@@ -164,7 +159,8 @@ func ImportHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParam
 			if r.Form.Get("ts") != "" {
 				timestamp, err = time.Parse("2006-01-02 15:04:05", r.Form.Get("ts"))
 				if err != nil {
-					fmt.Fprintf(w, " ** ERROR: import: %s\n", err.Error())
+					w.WriteHeader(http.StatusBadRequest)
+					fmt.Fprintf(w, " ** ERROR: import: Invalid timestamp: Format must be YYYY-MM-DD HH:MM:SS\n")
 					return
 				}
 			}
@@ -178,6 +174,7 @@ func ImportHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParam
 			os.Remove(temp_filename)
 		}
 	} else {
+		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintf(w, " ** ERROR: import: No file uploaded.\n")
 	}
 }

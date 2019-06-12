@@ -1,9 +1,18 @@
+/*
+ *  fvserver - Filevault server.
+ *
+ *  Copyright (c) 2019  Priceboro Newport, Inc.  All Rights Reserved.
+ *
+ */
+
 package main
 
 import (
+	"../cola/filestore"
 	"../cola/filevault"
 	"../cola/webapp"
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -12,54 +21,74 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
 var fv *filevault.FileVault
 var root_path string
 var temp_path string
+var data_path string
+var passwords *filestore.FileStore
 
 func main() {
+	var config_path string
+	args := os.Args
+	if len(args) > 1 {
+		config_path = args[1]
+	}
 	webapp.Register("", "/", Handler, false)
-	webapp.ListenAndServe("")
+	webapp.ListenAndServe(config_path)
 }
 
 func Handler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams) {
 	if fv == nil {
 		temp_path = webapp.Config.Read("temp_path", "/tmp/")
+		data_path = webapp.Config.Read("data_path", "./data/")
 		root_path = webapp.Config.Read("root_path")
 		fv = filevault.New(webapp.DB, root_path)
 	}
-	command := webapp.UrlPath(r, 0)
-	if command == "check" {
-		CheckHandler(w, r, p)
-		return
-	} else if command == "exist" {
-		ExistsHandler(w, r, p)
-		return
-	} else if command == "extract" {
-		ExtractHandler(w, r, p)
-		return
-	} else if command == "hash" {
-		HashHandler(w, r, p)
-		return
-	} else if command == "import" {
-		ImportHandler(w, r, p)
-		return
-	} else if command == "info" {
-		InfoHandler(w, r, p)
-		return
-	} else if command == "list" {
-		ListHandler(w, r, p)
-		return
-	} else if command == "query" {
-		QueryHandler(w, r, p)
-		return
+	auth := r.URL.Query().Get("auth")
+	if auth != "" {
+		command := webapp.UrlPath(r, 0)
+		if command == "check" {
+			CheckHandler(w, r, p)
+			return
+		} else if command == "exist" {
+			ExistsHandler(w, r, p)
+			return
+		} else if command == "extract" {
+			ExtractHandler(w, r, p)
+			return
+		} else if command == "hash" {
+			HashHandler(w, r, p)
+			return
+		} else if command == "import" {
+			ImportHandler(w, r, p)
+			return
+		} else if command == "info" {
+			InfoHandler(w, r, p)
+			return
+		} else if command == "list" {
+			ListHandler(w, r, p)
+			return
+		} else if command == "query" {
+			QueryHandler(w, r, p)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+	} else {
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprintf(w, "Unauthorized\n")
 	}
-	w.WriteHeader(http.StatusBadRequest)
+
 }
 
 func CheckHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams) {
+	if !ValidateAuth(r.URL.Query().Get("auth"), "check") {
+		fmt.Fprintf(w, " ** ERROR: Unauthorized\n")
+		return
+	}
 	results, err := fv.Check()
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -74,6 +103,10 @@ func CheckHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams
 
 func ExistsHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams) {
 	filename := r.URL.Query().Get("fn")
+	if !ValidateAuth(r.URL.Query().Get("auth"), "exist "+filename) {
+		fmt.Fprintf(w, " ** ERROR: Unauthorized\n")
+		return
+	}
 	if filename == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintf(w, " ** ERROR: exist: No filename specified.\n")
@@ -90,7 +123,12 @@ func ExistsHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParam
 }
 
 func ExtractHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams) {
+	auth := r.URL.Query().Get("auth")
 	fid := r.URL.Query().Get("f")
+	if !ValidateAuth(auth, "extract "+fid) {
+		fmt.Fprintf(w, " ** ERROR: Unauthorized\n")
+		return
+	}
 	if fid == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintf(w, " ** ERROR: extract: No file_id specified.\n")
@@ -113,7 +151,7 @@ func ExtractHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerPara
 		name = fi.Name
 	}
 	if webapp.UrlPath(r, 1) != name {
-		webapp.Redirect(w, r, "/extract/"+name+"?f="+fid+"&name="+url.QueryEscape(name))
+		webapp.Redirect(w, r, "/extract/"+name+"?auth="+auth+"&f="+fid+"&name="+url.QueryEscape(name))
 		return
 	}
 	temp_filename := temp_path + p.Session + filepath.Ext(name)
@@ -139,6 +177,10 @@ func ExtractHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerPara
 
 func HashHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams) {
 	hash := r.URL.Query().Get("h")
+	if !ValidateAuth(r.URL.Query().Get("auth"), "hash "+hash) {
+		fmt.Fprintf(w, " ** ERROR: Unauthorized\n")
+		return
+	}
 	if hash == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintf(w, " ** ERROR: hash: No hash specified.\n")
@@ -165,6 +207,11 @@ func ImportHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParam
 			return
 		} else {
 			defer file.Close()
+			filename := r.Form.Get("fn")
+			if !ValidateAuth(r.URL.Query().Get("auth"), "import "+filename) {
+				fmt.Fprintf(w, " ** ERROR: Unauthorized\n")
+				return
+			}
 			temp_filename := temp_path + p.Session + "_import"
 			f, err := os.OpenFile(temp_filename, os.O_WRONLY|os.O_CREATE, 0666)
 			if err != nil {
@@ -173,7 +220,6 @@ func ImportHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParam
 				return
 			}
 			io.Copy(f, file)
-			filename := r.Form.Get("fn")
 			if filename == "" {
 				w.WriteHeader(http.StatusBadRequest)
 				fmt.Fprintf(w, " ** ERROR: import: No filename specified.\n")
@@ -208,9 +254,17 @@ func ImportHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParam
 func InfoHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams) {
 	fid := r.URL.Query().Get("f")
 	if fid == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintf(w, " ** ERROR: info: No file_id specified.\n")
+		if !ValidateAuth(r.URL.Query().Get("auth"), "info") {
+			fmt.Fprintf(w, " ** ERROR: Unauthorized\n")
+			return
+		}
+		fmt.Fprintf(w, "Filevault Server v2.0\n")
 		return
+	} else {
+		if !ValidateAuth(r.URL.Query().Get("auth"), "info "+fid) {
+			fmt.Fprintf(w, " ** ERROR: Unauthorized\n")
+			return
+		}
 	}
 	file_id, _ := strconv.Atoi(fid)
 	if file_id == 0 {
@@ -234,6 +288,10 @@ func InfoHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams)
 
 func ListHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams) {
 	path := r.URL.Query().Get("p")
+	if !ValidateAuth(r.URL.Query().Get("auth"), "list "+path) {
+		fmt.Fprintf(w, " ** ERROR: Unauthorized\n")
+		return
+	}
 	if path == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintf(w, " ** ERROR: list: No path specified.\n")
@@ -252,6 +310,10 @@ func ListHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams)
 
 func QueryHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams) {
 	terms := r.URL.Query().Get("t")
+	if !ValidateAuth(r.URL.Query().Get("auth"), "query "+terms) {
+		fmt.Fprintf(w, " ** ERROR: Unauthorized\n")
+		return
+	}
 	if len(terms) == 0 {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintf(w, " ** ERROR: query: No query terms specified.\n")
@@ -265,4 +327,21 @@ func QueryHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams
 		w.WriteHeader(http.StatusNotFound)
 		fmt.Fprintf(w, " ** ERROR: %s\n", err.Error())
 	}
+}
+
+func SHA256(str string) string {
+	h := sha256.New()
+	h.Write([]byte(str))
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+func ValidateAuth(auth string, id string) bool {
+	components := strings.Split(auth, "/")
+	if len(components) != 3 {
+		return false
+	}
+	if passwords == nil {
+		passwords = filestore.New(data_path + "passwords.fs")
+	}
+	return SHA256(id+components[1]+passwords.Read(components[0])) == components[2]
 }

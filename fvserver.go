@@ -5,6 +5,7 @@
  *
  *  6/13/2019 - Version 2.0 - Added Authentication & https
  *  6/17/2019 - Version 2.1 - Added Roles & Permissions
+ *  6/18/2019 - Version 2.2 - Fixed Extract Bug / Added Unauthorized logging
  *
  */
 
@@ -19,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -28,7 +30,7 @@ import (
 	"time"
 )
 
-const version = "2.1"
+const version = "2.2"
 
 var fv *filevault.FileVault
 var root_path string
@@ -85,17 +87,16 @@ func Handler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams) {
 		}
 		w.WriteHeader(http.StatusBadRequest)
 	} else {
-		w.WriteHeader(http.StatusUnauthorized)
-		fmt.Fprintf(w, "Unauthorized\n")
+		Unauthorized(w, "", "", "")
 	}
 
 }
 
 func CheckHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams) {
-	root_directory, _ := ValidateAuth(r.URL.Query().Get("auth"), "check")
+	auth := r.URL.Query().Get("auth")
+	root_directory, _ := ValidateAuth(auth, "check")
 	if root_directory != "/" {
-		w.WriteHeader(http.StatusUnauthorized)
-		fmt.Fprintf(w, "Unauthorized")
+		Unauthorized(w, "check", auth, root_directory)
 		return
 	}
 	results, err := fv.Check()
@@ -112,10 +113,10 @@ func CheckHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams
 
 func ExistsHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams) {
 	filename := r.URL.Query().Get("fn")
-	root_directory, _ := ValidateAuth(r.URL.Query().Get("auth"), "exist "+filename)
+	auth := r.URL.Query().Get("auth")
+	root_directory, _ := ValidateAuth(auth, "exist "+filename)
 	if root_directory != "" && strings.Index(filename, root_directory) != 0 {
-		w.WriteHeader(http.StatusUnauthorized)
-		fmt.Fprintf(w, "Unauthorized")
+		Unauthorized(w, "exist "+filename, auth, root_directory)
 		return
 	}
 	if filename == "" {
@@ -138,8 +139,7 @@ func ExtractHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerPara
 	fid := r.URL.Query().Get("f")
 	root_directory, _ := ValidateAuth(auth, "extract "+fid)
 	if root_directory == "" {
-		w.WriteHeader(http.StatusUnauthorized)
-		fmt.Fprintf(w, "Unauthorized")
+		Unauthorized(w, "extract "+fid, auth, root_directory)
 		return
 	}
 	if fid == "" {
@@ -160,8 +160,7 @@ func ExtractHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerPara
 		return
 	}
 	if strings.Index(fi.Path, root_directory) != 0 {
-		w.WriteHeader(http.StatusUnauthorized)
-		fmt.Fprintf(w, "Unauthorized")
+		Unauthorized(w, "extract "+fid, fi.Path, root_directory)
 		return
 	}
 	name := r.URL.Query().Get("name")
@@ -169,7 +168,7 @@ func ExtractHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerPara
 		name = fi.Name
 	}
 	if webapp.UrlPath(r, 1) != name {
-		webapp.Redirect(w, r, "/extract/"+name+"?auth="+auth+"&f="+fid+"&name="+url.QueryEscape(name))
+		webapp.Redirect(w, r, "/extract/"+url.QueryEscape(name)+"?auth="+auth+"&f="+fid+"&name="+url.QueryEscape(name))
 		return
 	}
 	temp_filename := temp_path + p.Session + filepath.Ext(name)
@@ -194,11 +193,11 @@ func ExtractHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerPara
 }
 
 func HashHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams) {
+	auth := r.URL.Query().Get("auth")
 	hash := r.URL.Query().Get("h")
 	root_directory, _ := ValidateAuth(r.URL.Query().Get("auth"), "hash "+hash)
 	if root_directory == "" {
-		w.WriteHeader(http.StatusUnauthorized)
-		fmt.Fprintf(w, "Unauthorized")
+		Unauthorized(w, "hash "+hash, auth, root_directory)
 		return
 	}
 	if hash == "" {
@@ -229,11 +228,11 @@ func ImportHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParam
 			return
 		} else {
 			defer file.Close()
+			auth := r.URL.Query().Get("auth")
 			filename := r.Form.Get("fn")
-			root_directory, write_permission := ValidateAuth(r.URL.Query().Get("auth"), "import "+filename)
+			root_directory, write_permission := ValidateAuth(auth, "import "+filename)
 			if !write_permission || strings.Index(filename, root_directory) < 0 {
-				w.WriteHeader(http.StatusUnauthorized)
-				fmt.Fprintf(w, "Unauthorized")
+				Unauthorized(w, "import "+filename, auth, root_directory)
 				return
 			}
 			temp_filename := temp_path + p.Session + "_import"
@@ -276,22 +275,21 @@ func ImportHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParam
 }
 
 func InfoHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams) {
+	auth := r.URL.Query().Get("auth")
 	fid := r.URL.Query().Get("f")
 	var root_directory string
 	if fid == "" {
-		root_directory, _ = ValidateAuth(r.URL.Query().Get("auth"), "info")
+		root_directory, _ = ValidateAuth(auth, "info")
 		if root_directory == "" {
-			w.WriteHeader(http.StatusUnauthorized)
-			fmt.Fprintf(w, "Unauthorized")
+			Unauthorized(w, "info", auth, root_directory)
 			return
 		}
 		fmt.Fprintf(w, "Filevault Server v%s\n", version)
 		return
 	} else {
-		root_directory, _ = ValidateAuth(r.URL.Query().Get("auth"), "info "+fid)
+		root_directory, _ = ValidateAuth(auth, "info "+fid)
 		if root_directory == "" {
-			w.WriteHeader(http.StatusUnauthorized)
-			fmt.Fprintf(w, "Unauthorized")
+			Unauthorized(w, "info "+fid, auth, root_directory)
 			return
 		}
 	}
@@ -315,17 +313,16 @@ func InfoHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams)
 		fmt.Fprintf(w, "Size: %d\n", fi.Size)
 		fmt.Fprintf(w, "Hash: %s\n", fi.Hash)
 	} else {
-		w.WriteHeader(http.StatusUnauthorized)
-		fmt.Fprintf(w, "Unauthorized")
+		Unauthorized(w, "info "+fid, fi.Path, root_directory)
 	}
 }
 
 func ListHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams) {
+	auth := r.URL.Query().Get("auth")
 	path := r.URL.Query().Get("p")
-	root_directory, _ := ValidateAuth(r.URL.Query().Get("auth"), "list "+path)
+	root_directory, _ := ValidateAuth(auth, "list "+path)
 	if root_directory == "" || strings.Index(path, root_directory) != 0 {
-		w.WriteHeader(http.StatusUnauthorized)
-		fmt.Fprintf(w, "Unauthorized")
+		Unauthorized(w, "list "+path, auth, root_directory)
 		return
 	}
 	if path == "" {
@@ -345,11 +342,11 @@ func ListHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams)
 }
 
 func QueryHandler(w http.ResponseWriter, r *http.Request, p webapp.HandlerParams) {
+	auth := r.URL.Query().Get("auth")
 	terms := r.URL.Query().Get("t")
-	root_directory, _ := ValidateAuth(r.URL.Query().Get("auth"), "query "+terms)
+	root_directory, _ := ValidateAuth(auth, "query "+terms)
 	if root_directory == "" {
-		w.WriteHeader(http.StatusUnauthorized)
-		fmt.Fprintf(w, "Unauthorized")
+		Unauthorized(w, "query "+terms, auth, root_directory)
 		return
 	}
 	if len(terms) == 0 {
@@ -373,6 +370,12 @@ func SHA256(str string) string {
 	h := sha256.New()
 	h.Write([]byte(str))
 	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+func Unauthorized(w http.ResponseWriter, id string, auth string, root_directory string) {
+	log.Printf("Unauthorized - [%s] [%s] [%s]", id, auth, root_directory)
+	w.WriteHeader(http.StatusUnauthorized)
+	fmt.Fprintf(w, "Unauthorized")
 }
 
 func ValidateAuth(auth string, id string) (root_directory string, write_permission bool) {
